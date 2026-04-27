@@ -23,6 +23,9 @@ public partial class Form1 : Form
     [DllImport("user32.dll")] private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
     [DllImport("kernel32.dll")] private static extern IntPtr GetModuleHandle(string lpModuleName);
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hWnd);
+    
+    // --- 新增：用于一键摸鱼的显示/隐藏 API ---
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
     private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
@@ -33,6 +36,10 @@ public partial class Form1 : Form
     private const int WM_HOTKEY = 0x0312;
     private const int WH_MOUSE_LL = 14;
     private const int WM_MOUSEWHEEL = 0x020A;
+    
+    // 指令常量
+    private const int SW_HIDE = 0;
+    private const int SW_SHOW = 5;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
@@ -43,9 +50,10 @@ public partial class Form1 : Form
     private IntPtr pinnedHwnd = IntPtr.Zero;
     private RECT pinnedRect;
     private byte currentOpacity = 255;
+    private bool isBossHidden = false; // 摸鱼状态标识
     
     private BorderForm? borderForm;
-    private OsdForm? osdForm; // 透明度提示面板
+    private OsdForm? osdForm; 
     private System.Windows.Forms.Timer lockTimer;
     private CheckBox chkClickThrough;
 
@@ -57,23 +65,28 @@ public partial class Form1 : Form
     {
         InitializeComponent();
         this.Text = "ScreenNail ";
-        this.Size = new Size(300, 200);
+        this.Size = new Size(300, 220);
         this.TopMost = true;
 
         chkClickThrough = new CheckBox { Text = "开启鼠标穿透 (Ghost Mode)", Location = new Point(20, 20), Width = 200 };
         chkClickThrough.CheckedChanged += (s, e) => ApplyWindowStyles();
         this.Controls.Add(chkClickThrough);
 
-        Label lblHelp = new Label { Text = "快捷键: Ctrl + Shift + P\n按住 Alt + 滚轮调节透明度", Location = new Point(20, 60), Width = 250, Height = 50 };
+        Label lblHelp = new Label { 
+            Text = "锁定/解锁: Ctrl + Shift + P\n一键摸鱼: Ctrl + Shift + H\n调节透明度: Alt + 鼠标滚轮", 
+            Location = new Point(20, 60), Width = 250, Height = 80 
+        };
         this.Controls.Add(lblHelp);
 
-        RegisterHotKey(this.Handle, 1, 6, 0x50);
+        // 注册快捷键
+        RegisterHotKey(this.Handle, 1, 6, 0x50); // Ctrl+Shift+P (Pin)
+        RegisterHotKey(this.Handle, 2, 6, 0x48); // Ctrl+Shift+H (Hide/Boss)
 
         lockTimer = new System.Windows.Forms.Timer { Interval = 10 };
         lockTimer.Tick += LockTimer_Tick;
         lockTimer.Start();
 
-        osdForm = new OsdForm(); // 初始化指示器
+        osdForm = new OsdForm(); 
 
         _mouseProc = HookCallback;
         using (Process curProcess = Process.GetCurrentProcess())
@@ -85,8 +98,36 @@ public partial class Form1 : Form
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == 1) TogglePin();
+        if (m.Msg == WM_HOTKEY)
+        {
+            int id = m.WParam.ToInt32();
+            if (id == 1) TogglePin();
+            if (id == 2) ToggleBossMode(); // 处理老板键
+        }
         base.WndProc(ref m);
+    }
+
+    // --- 一键摸鱼核心逻辑 ---
+    private void ToggleBossMode()
+    {
+        if (pinnedHwnd == IntPtr.Zero || !IsWindow(pinnedHwnd)) return;
+
+        if (!isBossHidden)
+        {
+            // 开启摸鱼：隐藏窗口和边框
+            ShowWindow(pinnedHwnd, SW_HIDE);
+            borderForm?.Hide();
+            isBossHidden = true;
+        }
+        else
+        {
+            // 停止摸鱼：恢复显示
+            ShowWindow(pinnedHwnd, SW_SHOW);
+            borderForm?.Show();
+            isBossHidden = false;
+            // 确保窗口回到最顶层
+            ApplyWindowStyles();
+        }
     }
 
     private void TogglePin()
@@ -107,6 +148,7 @@ public partial class Form1 : Form
             pinnedHwnd = fg;
             GetWindowRect(pinnedHwnd, out pinnedRect);
             currentOpacity = 255;
+            isBossHidden = false; // 重置摸鱼状态
             ApplyWindowStyles();
 
             borderForm = new BorderForm();
@@ -121,6 +163,9 @@ public partial class Form1 : Form
         
         if (IsWindow(pinnedHwnd))
         {
+            // 如果在摸鱼状态下解锁，必须强制显示窗口
+            if (isBossHidden) ShowWindow(pinnedHwnd, SW_SHOW);
+
             SetWindowPos(pinnedHwnd, HWND_NOTOPMOST, 0, 0, 0, 0, 3);
             int style = GetWindowLong(pinnedHwnd, GWL_EXSTYLE);
             SetWindowLong(pinnedHwnd, GWL_EXSTYLE, style & ~WS_EX_LAYERED & ~WS_EX_TRANSPARENT);
@@ -134,6 +179,7 @@ public partial class Form1 : Form
             borderForm = null;
         }
         pinnedHwnd = IntPtr.Zero;
+        isBossHidden = false;
     }
 
     private void ApplyWindowStyles()
@@ -160,6 +206,9 @@ public partial class Form1 : Form
                 return;
             }
 
+            // 如果处于摸鱼模式，跳过位置同步和边框更新
+            if (isBossHidden) return;
+
             GetWindowRect(pinnedHwnd, out RECT curr);
             if (curr.Left != pinnedRect.Left || curr.Top != pinnedRect.Top || curr.Right != pinnedRect.Right || curr.Bottom != pinnedRect.Bottom)
             {
@@ -171,7 +220,7 @@ public partial class Form1 : Form
 
     private void UpdateBorderPosition()
     {
-        if (borderForm != null && pinnedHwnd != IntPtr.Zero)
+        if (borderForm != null && pinnedHwnd != IntPtr.Zero && !isBossHidden)
         {
             borderForm.Bounds = new Rectangle(pinnedRect.Left - 5, pinnedRect.Top - 5, (pinnedRect.Right - pinnedRect.Left) + 10, (pinnedRect.Bottom - pinnedRect.Top) + 10);
         }
@@ -179,7 +228,7 @@ public partial class Form1 : Form
 
     private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 && wParam == (IntPtr)WM_MOUSEWHEEL && pinnedHwnd != IntPtr.Zero)
+        if (nCode >= 0 && wParam == (IntPtr)WM_MOUSEWHEEL && pinnedHwnd != IntPtr.Zero && !isBossHidden)
         {
             if ((Control.ModifierKeys & Keys.Alt) == Keys.Alt)
             {
@@ -187,13 +236,10 @@ public partial class Form1 : Form
                 int delta = (short)((hookStruct.mouseData >> 16) & 0xFFFF);
                 
                 int newOpacity = currentOpacity + (delta > 0 ? 15 : -15);
-                currentOpacity = (byte)Math.Max(15, Math.Min(255, newOpacity)); // 限制范围
+                currentOpacity = (byte)Math.Max(15, Math.Min(255, newOpacity)); 
                 ApplyWindowStyles();
 
-                // 计算百分比并显示指示器
                 int percent = (int)Math.Round((currentOpacity / 255.0) * 100);
-                
-                // 在目标窗口的中央偏下位置显示OSD
                 int cx = pinnedRect.Left + (pinnedRect.Right - pinnedRect.Left) / 2;
                 int cy = pinnedRect.Top + (pinnedRect.Bottom - pinnedRect.Top) / 2;
                 osdForm?.ShowOsd(percent, cx, cy);
@@ -206,8 +252,9 @@ public partial class Form1 : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        UnlockCurrent();
+        UnlockCurrent(); // 确保退出时恢复所有窗口状态
         UnregisterHotKey(this.Handle, 1);
+        UnregisterHotKey(this.Handle, 2);
         UnhookWindowsHookEx(_mouseHookID);
         base.OnFormClosing(e);
     }
@@ -221,7 +268,6 @@ public class BorderForm : Form
         this.FormBorderStyle = FormBorderStyle.None;
         this.ShowInTaskbar = false;
         this.TopMost = true;
-        // 使用洋红色作为透明色，避免抗锯齿边缘产生难看的黑边
         this.BackColor = Color.Magenta;
         this.TransparencyKey = Color.Magenta; 
     }
@@ -229,15 +275,13 @@ public class BorderForm : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias; // 开启抗锯齿，使圆角平滑
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias; 
 
-        // 绘制霓虹渐变（从蓝到紫红）
         Rectangle rect = new Rectangle(4, 4, this.Width - 9, this.Height - 9);
         using (LinearGradientBrush brush = new LinearGradientBrush(rect, Color.FromArgb(0, 212, 255), Color.FromArgb(255, 0, 128), 45f))
-        using (Pen pen = new Pen(brush, 6)) // 边框粗细
+        using (Pen pen = new Pen(brush, 6)) 
         {
             pen.LineJoin = LineJoin.Round;
-            // 构造带圆角的路径 (Radius = 12 适配 Win11)
             using (GraphicsPath path = GetRoundedRect(rect, 12))
             {
                 e.Graphics.DrawPath(pen, path);
@@ -245,23 +289,20 @@ public class BorderForm : Form
         }
     }
 
-    // 辅助方法：生成圆角矩形路径
     private GraphicsPath GetRoundedRect(Rectangle bounds, int radius)
     {
         int diameter = radius * 2;
         Size size = new Size(diameter, diameter);
         Rectangle arc = new Rectangle(bounds.Location, size);
         GraphicsPath path = new GraphicsPath();
-
         if (radius == 0) { path.AddRectangle(bounds); return path; }
-
-        path.AddArc(arc, 180, 90); // 左上角
+        path.AddArc(arc, 180, 90); 
         arc.X = bounds.Right - diameter;
-        path.AddArc(arc, 270, 90); // 右上角
+        path.AddArc(arc, 270, 90); 
         arc.Y = bounds.Bottom - diameter;
-        path.AddArc(arc, 0, 90); // 右下角
+        path.AddArc(arc, 0, 90); 
         arc.X = bounds.Left;
-        path.AddArc(arc, 90, 90); // 左下角
+        path.AddArc(arc, 90, 90); 
         path.CloseFigure();
         return path;
     }
@@ -279,10 +320,9 @@ public class OsdForm : Form
         this.ShowInTaskbar = false;
         this.TopMost = true;
         this.BackColor = Color.Black;
-        this.Opacity = 0.8; // 面板自身的半透明
+        this.Opacity = 0.8; 
         this.Size = new Size(160, 50);
         
-        // 让窗体圆角（使用简单的Region裁剪）
         GraphicsPath p = new GraphicsPath();
         p.AddArc(0, 0, 15, 15, 180, 90);
         p.AddArc(this.Width - 15, 0, 15, 15, 270, 90);
@@ -300,7 +340,6 @@ public class OsdForm : Form
         };
         this.Controls.Add(lblText);
 
-        // 初始化隐藏定时器（1.5秒后隐藏）
         hideTimer = new System.Windows.Forms.Timer { Interval = 1500 };
         hideTimer.Tick += (s, e) => {
             this.Hide();
@@ -308,18 +347,14 @@ public class OsdForm : Form
         };
     }
 
-    // 外部调用：更新数值并显示
     public void ShowOsd(int percent, int centerX, int cy)
     {
         lblText.Text = $"透明度: {percent}%";
-        // 居中显示
         this.Location = new Point(centerX - this.Width / 2, cy - this.Height / 2);
         this.Show();
-        // 每次触发都重置隐藏倒计时
         hideTimer.Stop();
         hideTimer.Start();
     }
     
-    // 让OSD面板不抢夺焦点（不可被激活）
     protected override bool ShowWithoutActivation => true;
 }
